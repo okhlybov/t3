@@ -1,18 +1,11 @@
-# ... and now the True Test (tm) Hold fast or expire ...
+# https://github.com/okhlybov/t3
 
+# ... and now the True Test (tm)
+#     Hold fast or expire ...
 
 package provide T3 0.1.0
 
-puts $tcl_interactive
-if {$tcl_interactive} {exit}
-
-# Capture current source file name as it is set for the toplevel interpreter only
-catch {
-  set source $argv0
-  # The code below is executed by the toplevel interpreter only
-  puts stderr "--- # T3 report stream"
-  puts stderr {}
-}
+if {$tcl_interactive} {error {T3 package can not be used from within interactive session}}
 
 package require Tcl 8.6
 package require Thread
@@ -20,6 +13,8 @@ package require Thread
 if {[catch {set |boxed|}]} {
 
   # The code below is executed by the master interpreter
+
+  if {[catch {set |descended|}]} {puts stderr {--- # T3 report stream}}
 
   # https://wiki.tcl-lang.org/page/lshift
   proc lshift {args} {
@@ -176,7 +171,7 @@ if {[catch {set |boxed|}]} {
 
       # Re-evaluate current source on the playground
 
-      if {[catch {interp eval playground [subst -nocommands {source [set source {$source}]}]} result options]} {
+      if {[catch {interp eval playground [subst -nocommands {source [set argv0 {$argv0}]}]} result options]} {
         puts stderr [dict get $options -errorinfo]
       } else {
         # Process the results of completed jobs
@@ -188,19 +183,17 @@ if {[catch {set |boxed|}]} {
         }
       }
 
-      puts stderr {}
-
     } finally {
       tpool::release $pool
     }
 
-    # Handle subprojects
-    foreach source [glob -nocomplain -type f -tails -directory [file dirname $source] [file join * [file tail $source]]] {
+    # Handle subprojects sharing this source' name recursively
+    foreach source [glob -nocomplain -type f -tails -directory [pwd] [file join * [file tail $argv0]]] {
       set wd [pwd]
       try {
         interp create descent
         try {
-          interp eval descent [subst -nocommands { source [set source {$source}] }]
+          interp eval descent [subst -nocommands {set |descended| 1; source [set argv0 {$source}]}]
         } finally {
           interp delete descent
         }
@@ -219,8 +212,8 @@ if {[catch {set |boxed|}]} {
 
   # This part precedes the user-supplied code evaluated on the playground
 
-  cd [file dirname $source]
+  cd [file dirname $argv0]
 
   puts stderr "- [pwd]"
-  puts stderr "  source: [file tail $source]"
+  puts stderr "  source: [file tail $argv0]"
 }
