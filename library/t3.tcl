@@ -9,48 +9,137 @@ if {$tcl_interactive} {error {T3 package can not be used from within interactive
 
 package require Tcl 8.6
 package require Thread
+package require Itcl
 
 if {[catch {set |boxed|}]} {
 
   # The code below is executed by the master interpreter
 
-  if {[catch {set |descended|}]} {puts stderr {--- # T3 report stream}}
-
   # https://wiki.tcl-lang.org/page/lshift
   proc lshift {args} {
-      lassign $args listVar count
-      upvar 1 $listVar var
-      if { ! [info exists var] } {
-          return -level 1 -code error [subst {can't read "$listVar": no such variable}]
+    lassign $args listVar count
+    upvar 1 $listVar var
+    if { ! [info exists var] } {
+        return -level 1 -code error [subst {can't read "$listVar": no such variable}]
+    }
+    switch -exact -- [llength $args] {
+      1 { set var [lassign $var value] }
+      2 {
+          set value [lrange $var 0 $count-1]
+          set var [lrange $var $count end]
       }
-      switch -exact -- [llength $args] {
-        1 { set var [lassign $var value] }
-        2 {
-            set value [lrange $var 0 $count-1]
-            set var [lrange $var $count end]
-        }
-        default {
-          return -level 1 -code error [subst {wrong # args: should be "lshift listVar ?count?"}]
-        }
+      default {
+        return -level 1 -code error [subst {wrong # args: should be "lshift listVar ?count?"}]
       }
-      return $value
+    }
+    return $value
+  }
+
+  # Async unit
+  itcl::class unit {
+
+    # Unit name
+    public variable name #[incr index]
+
+    # Set of assigned tags
+    public variable tags [list]
+
+    # Setup code block
+    public variable setup {}
+
+    # Cleanup code block
+    public variable cleanup {}
+
+    # Main code block
+    public variable code
+
+    constructor {code} {
+      configure -code $code
     }
 
-      # Output stream collector
-      oo::class create Collector {
+    # Submit unit's job
+    method enqueue {} {
+      lappend pending [tpool::post $pool [script]]
+    }
+
+    # Render the job's script
+    method script {} {
+      subst -nocommands {
+        |stdout| reset
+        |stderr| reset
+        set outcome [catch {
+          $setup
+          try {
+            $code
+          } finally {
+            $cleanup
+          }
+        } result options]
+        flush stdout
+        flush stderr
+        return [dict merge \$options [dict create -this $this -stdout [|stdout| stream] -stderr [|stderr| stream] -result \$result]]
+      }
+    }
+
+    # Analyze the completed job's outcome
+    method analyze {outcome} {
+      puts $outcome
+    }
+
+    # Unique index to create default unit names
+    common index 0
+
+    # Thread pool used to run units' scripts
+    common pool [tpool::create -initcmd {
+      oo::class create |channel| {
         variable stream
-        method initialize {handle mode} {
-          set stream {}
-          return {initialize finalize write}
-        }
-        method write {handle buffer} {
-          append stream $buffer
-          return
-        }
-        method stream {} {
-          return $stream
+        method initialize {handle mode} {return {initialize finalize write}}
+        method write {handle buffer} {append stream $buffer; return}
+        method reset {} {set stream {}}
+        method stream {} {return $stream}
+      }
+      chan push stdout [|channel| create |stdout|]
+      chan push stderr [|channel| create |stderr|]
+    }]
+
+    # Current list of submitted and unprocessed jobs
+    common pending [list]
+
+    # Wait for and process the results of all pending units' jobs
+    proc process {} {
+      while {[llength $pending] > 0} {
+        foreach job [tpool::wait $pool $pending pending] {
+          set outcome [tpool::get $pool $job]
+          [dict get $outcome -this] analyze $outcome
         }
       }
+    }
+
+    # Perform cleanup operations
+    proc shutdown {} {
+      tpool::release $pool
+    }
+
+    #
+    proc define {args} {
+      set usage {unit ?-option value ...? ?--? code}
+      set options [list]
+      set params [list]
+      while {[llength $args]} {
+        switch -glob -- [lindex $args 0] {
+          -- {break}
+          -* {lappend options {*}[lshift args 2]}
+          default {lappend params [lshift args]}
+        }
+      }
+      lappend params {*}$args
+      if {![llength $params]} {error $usage}
+      set unit [unit #auto {*}$params]
+      $unit configure {*}$options
+      $unit enqueue
+      return
+    }
+  }
 
   interp create playground
 
@@ -59,125 +148,20 @@ if {[catch {set |boxed|}]} {
     # Flag the playground interpreter to skip configuration and proceed to the user's code
     playground eval set |boxed| 1
 
-    # Entities shared among the Unit's instances
-    namespace eval Unit {
-      # Counter used to generate default unit names
-      set index 0
-      # Unit constuctor's creation error message
-      set usage {usage: ?-name ...? ?-tags {...}? ?-setup {code}? ?-cleanup {code}? code}
-      # List of created units
-      set units [list]
-      # List of run jobs
-      set jobs [list]
-      # Threads pool for async jobs
-      set pool [tpool::create -initcmd {
-        package require TclOO
-        # Output stream collector
-        oo::class create Collector {
-          variable stream
-          constructor {} {my reset}
-          method reset {} {set stream {}}
-          method stream {} {return $stream}
-          method initialize {handle mode} {return {initialize finalize write}}
-          method write {handle buffer} {
-            append stream $buffer
-            return
-          }
-        }
-        Collector create |stdout|
-        chan push stdout |stdout|
-        Collector create |stderr|
-        chan push stderr |stderr|
-      }]
-    }
-
-    #
-    oo::class create Unit {
-      #
-      constructor {args} {
-        my variable name tags setup cleanup code
-        set name #[incr Unit::index]
-        set tags [list]
-        set setup {}
-        set cleanup {}
-        set params [list]
-        while {[llength $args] > 0} {
-          switch -glob [lindex $args 0] {
-            -name {lassign [lshift args 2] _ name}
-            -tags {lassign [lshift args 2] _ tags}
-            -setup {lassign [lshift args 2] _ setup}
-            -cleanup {lassign [lshift args 2] _ cleanup}
-            -* {error $Unit::usage}
-            default {lappend params [lshift args]}
-          }
-        }
-        if {[llength $params] != 1} {error $Unit::usage}
-        set code [lindex $params 0]
-        lappend Unit::units [self]
-      }
-      # Render the script to be executed in the pooled thread context
-      method script {} {
-        my variable name tags setup cleanup code
-        set unit [self]
-        subst -nocommands {
-          # Standard channel redirectors are reused across the pool's threads therefore
-          # they should be cleared of the previous invokation contents
-          |stdout| reset
-          |stderr| reset
-          # Run the user-supplied code
-          set outcome [catch {
-            $setup
-            try {
-              $code
-            } finally {
-              $cleanup
-            }
-          } result options]
-          # Yield the run report
-          return [dict merge \$options [dict create -unit $unit -stdout [|stdout| stream] -stderr [|stderr| stream] -result \$result]]
-        }
-      }
-      # Process the outcome of the script execution
-      method report {outcome} {
-        variable name
-        puts stderr "  - $name"
-        dict with outcome {
-          if {${-code}} {
-            puts stderr "    outcome: FAILURE"
-          } else {
-            puts stderr "    outcome: SUCCESS"
-          }
-        }
-        flush stderr
-      }
-    }
-
-    # Proc exposed to the custom script which defines new units
-    proc unit {args} {
-      lappend Unit::jobs [tpool::post $Unit::pool [[Unit new {*}$args] script]]
-    }
-
-    playground alias unit unit
+    playground alias unit unit::define
 
     try {
 
       # Re-evaluate current source on the playground
 
       if {[catch {interp eval playground [subst -nocommands {source [set argv0 {$argv0}]}]} result options]} {
-        # TODO
-        puts stderr [dict get $options -errorinfo]
+        puts stderr [dict get $options -errorinfo]; # TODO
       } else {
-        # Process the results of completed jobs
-        while {[llength $Unit::jobs] > 0} {
-          foreach job [tpool::wait $Unit::pool $Unit::jobs Unit::jobs] {
-            set outcome [tpool::get $Unit::pool $job]
-            [dict get $outcome -unit] report $outcome
-          }
-        }
+        unit::process
       }
 
     } finally {
-      tpool::release $Unit::pool
+      unit::shutdown
     }
 
     # Handle subprojects sharing this source' name recursively
