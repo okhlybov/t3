@@ -59,34 +59,6 @@ if {[catch {set |boxed|}]} {
     # Flag the playground interpreter to skip configuration and proceed to the user's code
     playground eval set |boxed| 1
 
-    # List of submitted job units
-    set jobs [list]
-
-    set pool [tpool::create -initcmd {
-
-      package require TclOO
-
-      # Output stream collector
-      oo::class create Collector {
-        variable stream
-        constructor {} {my reset}
-        method reset {} {set stream {}}
-        method stream {} {return $stream}
-        method initialize {handle mode} {return {initialize finalize write}}
-        method write {handle buffer} {
-          append stream $buffer
-          return
-        }
-      }
-
-      Collector create |stdout|
-      chan push stdout |stdout|
-
-      Collector create |stderr|
-      chan push stderr |stderr|
-
-    }]
-
     # Entities shared among the Unit's instances
     namespace eval Unit {
       # Counter used to generate default unit names
@@ -95,6 +67,28 @@ if {[catch {set |boxed|}]} {
       set usage {usage: ?-name ...? ?-tags {...}? ?-setup {code}? ?-cleanup {code}? code}
       # List of created units
       set units [list]
+      # List of run jobs
+      set jobs [list]
+      # Threads pool for async jobs
+      set pool [tpool::create -initcmd {
+        package require TclOO
+        # Output stream collector
+        oo::class create Collector {
+          variable stream
+          constructor {} {my reset}
+          method reset {} {set stream {}}
+          method stream {} {return $stream}
+          method initialize {handle mode} {return {initialize finalize write}}
+          method write {handle buffer} {
+            append stream $buffer
+            return
+          }
+        }
+        Collector create |stdout|
+        chan push stdout |stdout|
+        Collector create |stderr|
+        chan push stderr |stderr|
+      }]
     }
 
     #
@@ -160,9 +154,7 @@ if {[catch {set |boxed|}]} {
 
     # Proc exposed to the custom script which defines new units
     proc unit {args} {
-      upvar pool pool
-      upvar jobs jobs
-      lappend jobs [tpool::post $pool [[Unit new {*}$args] script]]
+      lappend Unit::jobs [tpool::post $Unit::pool [[Unit new {*}$args] script]]
     }
 
     playground alias unit unit
@@ -172,19 +164,20 @@ if {[catch {set |boxed|}]} {
       # Re-evaluate current source on the playground
 
       if {[catch {interp eval playground [subst -nocommands {source [set argv0 {$argv0}]}]} result options]} {
+        # TODO
         puts stderr [dict get $options -errorinfo]
       } else {
         # Process the results of completed jobs
-        while {[llength $jobs] > 0} {
-          foreach job [tpool::wait $pool $jobs jobs] {
-            set outcome [tpool::get $pool $job]
+        while {[llength $Unit::jobs] > 0} {
+          foreach job [tpool::wait $Unit::pool $Unit::jobs Unit::jobs] {
+            set outcome [tpool::get $Unit::pool $job]
             [dict get $outcome -unit] report $outcome
           }
         }
       }
 
     } finally {
-      tpool::release $pool
+      tpool::release $Unit::pool
     }
 
     # Handle subprojects sharing this source' name recursively
