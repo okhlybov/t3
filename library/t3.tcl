@@ -38,8 +38,11 @@ if {[catch {set |boxed|}]} {
   # Async unit
   itcl::class unit {
 
+    # Unit unique index
+    public variable index
+
     # Unit name
-    public variable name #[incr index]
+    public variable name
 
     # Set of assigned tags
     public variable tags [list]
@@ -54,12 +57,16 @@ if {[catch {set |boxed|}]} {
     public variable code
 
     constructor {code} {
+      incr count
+      set index $count
+      set name @$count
       configure -code $code
     }
 
     # Submit unit's job
-    method enqueue {} {
+    method submit {} {
       lappend pending [tpool::post $pool [script]]
+      lappend submitted [self]
     }
 
     # Render the job's script
@@ -81,13 +88,42 @@ if {[catch {set |boxed|}]} {
       }
     }
 
+    proc puts-output {pad tag output} {
+      set lines [split $output "\n"]
+      if {[lindex $lines end] eq ""} {set lines [lrange $lines 0 end-1]}
+      switch [llength $lines] {
+        0 {}
+        1 {puts "${pad}${tag}: [lindex $lines 0]"}
+        default {
+          puts "${pad}${tag}: |"
+          foreach line $lines {puts "${pad}  $line"}
+        }
+      }
+    }
+
     # Analyze the completed job's outcome
     method analyze {outcome} {
-      puts $outcome
+      dict with outcome {
+        if {${-code}} {
+          puts "\n${::pad}not ok $index - $name # ${-result}"
+          set pad "${::pad}  "
+          puts "${pad}---"
+          puts "${pad}root: [pwd]"
+          puts "${pad}source: [file tail $::argv0]"
+          puts "${pad}exit: ${-code}"
+          puts "${pad}return: ${-result}"
+          puts-output $pad stdout ${-stdout}
+          puts-output $pad stderr ${-stderr}
+          puts "${pad}..."
+        } else {
+          puts "\n${::pad}ok $index - $name"
+        }
+      }
+      flush stdout
     }
 
     # Unique index to create default unit names
-    common index 0
+    common count 0
 
     # Thread pool used to run units' scripts
     common pool [tpool::create -initcmd {
@@ -104,6 +140,9 @@ if {[catch {set |boxed|}]} {
 
     # Current list of submitted and unprocessed jobs
     common pending [list]
+
+    # Public list of submitted units
+    public common submitted [list]
 
     # Wait for and process the results of all pending units' jobs
     proc process {} {
@@ -136,12 +175,24 @@ if {[catch {set |boxed|}]} {
       if {![llength $params]} {error $usage}
       set unit [unit #auto {*}$params]
       $unit configure {*}$options
-      $unit enqueue
+      $unit submit
       return
     }
   }
 
   interp create playground
+
+  if {[catch {set @nesting}]} {
+    # Executed by master toplevel interpreter only which has no @nesting variable set
+    puts {TAP version 14}
+    set @nesting 0
+  }
+
+  if {!${@nesting}} {puts "\n# $argv0"}
+
+  # Space-padding string
+  # Each nesting level adds up 4 spaces
+  set pad [format %[expr {${@nesting}*4}]s {}]
 
   try {
 
@@ -151,26 +202,31 @@ if {[catch {set |boxed|}]} {
     playground alias unit unit::define
 
     try {
-
       # Re-evaluate current source on the playground
-
       if {[catch {interp eval playground [subst -nocommands {source [set argv0 {$argv0}]}]} result options]} {
-        puts stderr [dict get $options -errorinfo]; # TODO
+        puts "\n${pad}1..0 # $result"
       } else {
         unit::process
+        puts "\n${pad}1..[llength $unit::submitted]"
       }
-
     } finally {
       unit::shutdown
     }
 
-    # Handle subprojects sharing this source' name recursively
+    # Compute nesting level for subprojects
+    set nesting [expr {${@nesting}+1}]
+
+    # Recursive handling the subprojects sharing this source' name
     foreach source [glob -nocomplain -type f -tails -directory [pwd] [file join * [file tail $argv0]]] {
       set wd [pwd]
       try {
         interp create descent
         try {
-          interp eval descent [subst -nocommands {set |descended| 1; source [set argv0 {$source}]}]
+          puts "\n${pad}# Subtest: [file join [file dirname $argv0] $source]"
+          interp eval descent [subst -nocommands {
+            set @nesting $nesting
+            source [set argv0 {$source}]
+          }]
         } finally {
           interp delete descent
         }
@@ -191,6 +247,4 @@ if {[catch {set |boxed|}]} {
 
   cd [file dirname $argv0]
 
-  puts stderr "- [pwd]"
-  puts stderr "  source: [file tail $argv0]"
 }
