@@ -11,7 +11,7 @@ package require Tcl 8.6
 package require Thread
 package require Itcl
 
-if {[catch {set |boxed|}]} {
+if {[catch {set @boxed}]} {
 
   # The code below is executed by the master interpreter
 
@@ -72,8 +72,8 @@ if {[catch {set |boxed|}]} {
     # Render the job's script
     method script {} {
       subst -nocommands {
-        |stdout| reset
-        |stderr| reset
+        @stdout reset
+        @stderr reset
         set outcome [catch {
           $setup
           try {
@@ -84,7 +84,7 @@ if {[catch {set |boxed|}]} {
         } result options]
         flush stdout
         flush stderr
-        return [dict merge \$options [dict create -this $this -stdout [|stdout| stream] -stderr [|stderr| stream] -result \$result]]
+        return [dict merge \$options [dict create -this $this -stdout [@stdout stream] -stderr [@stderr stream] -result \$result]]
       }
     }
 
@@ -127,15 +127,15 @@ if {[catch {set |boxed|}]} {
 
     # Thread pool used to run units' scripts
     common pool [tpool::create -initcmd {
-      oo::class create |channel| {
+      oo::class create @channel {
         variable stream
         method initialize {handle mode} {return {initialize finalize write}}
         method write {handle buffer} {append stream $buffer; return}
         method reset {} {set stream {}}
         method stream {} {return $stream}
       }
-      chan push stdout [|channel| create |stdout|]
-      chan push stderr [|channel| create |stderr|]
+      chan push stdout [@channel create @stdout]
+      chan push stderr [@channel create @stderr]
     }]
 
     # Current list of submitted and unprocessed jobs
@@ -197,7 +197,7 @@ if {[catch {set |boxed|}]} {
   try {
 
     # Flag the playground interpreter to skip configuration and proceed to the user's code
-    playground eval set |boxed| 1
+    playground eval set @boxed 1
 
     playground alias unit unit::define
 
