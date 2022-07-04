@@ -88,7 +88,7 @@ if {[catch {set @boxed}]} {
       }
     }
 
-    proc puts-output {pad tag output} {
+    proc puts-yaml-multiline {pad tag output} {
       set lines [split $output "\n"]
       if {[lindex $lines end] eq ""} {set lines [lrange $lines 0 end-1]}
       switch [llength $lines] {
@@ -104,19 +104,34 @@ if {[catch {set @boxed}]} {
     # Analyze the completed job's outcome
     method analyze {outcome} {
       dict with outcome {
+        switch $::output {
+          tap {
+            if {${-code}} {
+              puts "\n${::pad}not ok $index - $name # ${-result}"
+              set pad "${::pad}  "
+              puts "${pad}---"
+              puts "${pad}root: [pwd]"
+              puts "${pad}source: [file tail $::argv0]"
+              puts "${pad}exit: ${-code}"
+              puts "${pad}return: ${-result}"
+              puts-yaml-multiline $pad stdout ${-stdout}
+              puts-yaml-multiline $pad stderr ${-stderr}
+              puts "${pad}..."
+            } else {
+              puts "\n${::pad}ok $index - $name"
+            }
+          }
+          default {
+            switch ${-code} {
+              0 {puts -nonewline .}
+              default {puts -nonewline F}
+            }
+          }
+        }
+        # Flag the entire harness failure if any of units fail
         if {${-code}} {
-          puts "\n${::pad}not ok $index - $name # ${-result}"
-          set pad "${::pad}  "
-          puts "${pad}---"
-          puts "${pad}root: [pwd]"
-          puts "${pad}source: [file tail $::argv0]"
-          puts "${pad}exit: ${-code}"
-          puts "${pad}return: ${-result}"
-          puts-output $pad stdout ${-stdout}
-          puts-output $pad stderr ${-stderr}
-          puts "${pad}..."
-        } else {
-          puts "\n${::pad}ok $index - $name"
+          set ::status 1
+          lappend failed [self]
         }
       }
       flush stdout
@@ -141,8 +156,11 @@ if {[catch {set @boxed}]} {
     # Current list of submitted and unprocessed jobs
     common pending [list]
 
-    # Public list of submitted units
+    # List of submitted units
     public common submitted [list]
+
+    # List of failed tests
+    public common failed [list]
 
     # Wait for and process the results of all pending units' jobs
     proc process {} {
@@ -180,16 +198,27 @@ if {[catch {set @boxed}]} {
     }
   }
 
+  # Exit status to be returned to OS
+  set status 0
+
+  # Results output mode: {default tap}
+  set output default
+
+  # Tth interpreter sandbox which executes the user-supplied code
   interp create playground
 
   if {[catch {set @nesting}]} {
     # Executed by master toplevel interpreter only which has no @nesting variable set
-    puts {TAP version 14}
+    switch $output {
+      tap {puts {TAP version 14}}
+    }
     set @nesting 0
   }
 
-  if {!${@nesting}} {puts "\n# $argv0"}
-
+  switch $output {
+    tap {if {!${@nesting}} {puts "\n# $argv0"}}
+  }
+  
   # Space-padding string
   # Each nesting level adds up 4 spaces
   set pad [format %[expr {${@nesting}*4}]s {}]
@@ -204,12 +233,21 @@ if {[catch {set @boxed}]} {
     try {
       # Re-evaluate current source on the playground
       if {[catch {interp eval playground [subst -nocommands {source [set argv0 {$argv0}]}]} result options]} {
-        puts "\n${pad}1..0 # $result"
+        switch $output {
+          tap {puts "\n${pad}1..0 # $result"}
+        }
+        # Failure during interpreting user-supplied code
+        set status 1
       } else {
         unit::process
-        puts "\n${pad}1..[llength $unit::submitted]"
+        switch $output {
+          tap {puts "\n${pad}1..[llength $unit::submitted]"}
+        }
       }
     } finally {
+      # Collect statistics
+      set submitted [llength $unit::submitted]
+      set failed [llength $unit::failed]
       unit::shutdown
     }
 
@@ -219,27 +257,37 @@ if {[catch {set @boxed}]} {
     # Recursive handling the subprojects sharing this source' name
     foreach source [glob -nocomplain -type f -tails -directory [pwd] [file join * [file tail $argv0]]] {
       set wd [pwd]
-      try {
-        interp create descent
-        try {
-          puts "\n${pad}# Subtest: [file join [file dirname $argv0] $source]"
-          interp eval descent [subst -nocommands {
-            set @nesting $nesting
-            source [set argv0 {$source}]
-          }]
-        } finally {
-          interp delete descent
-        }
-      } finally {
-        cd $wd
+      switch $output {
+        tap {puts "\n${pad}# Subtest: [file join [file dirname $argv0] $source]"}
       }
+      interp create descent
+      set code [subst -nocommands {
+        set @nesting $nesting
+        source [set argv0 {$source}]
+      }]
+      # FIXME proper exception handling
+      catch {interp eval descent $code}
+      if {[interp eval descent set status]} {set status 1}
+      incr submitted [interp eval descent {set submitted}]
+      incr failed [interp eval descent {set failed}]
+      interp delete descent
+      cd $wd
     }
 
   } finally {
     interp delete playground
   }
 
-  exit
+  if {${@nesting}} {
+    # Termination part of the subproject
+    error
+  } else {
+    # Termination part of toplevel project
+    switch $output {
+      default {puts "\n[expr {$submitted - $failed}]/$submitted"}
+    }
+    exit $status
+  }
 
 } else {
 
