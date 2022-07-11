@@ -80,7 +80,7 @@ if {[catch {set @boxed}]} {
     }
 
     # Construct a (quasi) unique #tag for unit
-    private method quid {} {
+    method quid {} {
       return #[format %04x [crc16ish "$name[pwd]$::argv0"]]
     }
 
@@ -336,6 +336,10 @@ if {[catch {set @boxed}]} {
 
     playground alias unit unit::define
 
+    # Lists of quids
+    set submitted [list]
+    set failed [list]
+
     try {
       # Re-evaluate current source on the playground
       if {[catch {interp eval playground [subst -nocommands {source [set argv0 {$argv0}]}]} result options]} {
@@ -352,8 +356,8 @@ if {[catch {set @boxed}]} {
       }
     } finally {
       # Collect statistics
-      set submitted [llength $unit::submitted]
-      set failed [llength $unit::failed]
+      foreach unit $unit::submitted {lappend submitted [$unit quid]}
+      foreach unit $unit::failed {lappend failed [$unit quid]}
       unit::shutdown
     }
 
@@ -369,14 +373,14 @@ if {[catch {set @boxed}]} {
       interp create descent
       set code [subst -nocommands {
         set @nesting $nesting
-        set argv $argv
+        set argv [list $argv]
         source [set argv0 {$source}]
       }]
       # FIXME proper exception handling
       catch {interp eval descent $code}
-      if {[interp eval descent set status]} {set status 1}
-      incr submitted [interp eval descent {set submitted}]
-      incr failed [interp eval descent {set failed}]
+      if {[interp eval descent {set status}]} {set status 1}
+      lappend submitted {*}[interp eval descent {set submitted}]
+      lappend failed {*}[interp eval descent {set failed}]
       interp delete descent
       cd $wd
     }
@@ -386,11 +390,17 @@ if {[catch {set @boxed}]} {
   }
 
   if {${@nesting}} {
+    # FIXME
     # Termination part of the subproject
-    error
+    error "exiting from the subproject"
   } else {
     # Termination part of toplevel project
-    if {$progress && !$quiet} {puts stderr "\n[expr {$submitted - $failed}]/$submitted"}
+    set sc [llength $submitted]
+    set fc [llength $failed]
+    if {$progress && !$quiet} {puts stderr "\n[expr {$sc - $fc}]/$sc"}
+    if {$verbose && !$quiet} {
+      foreach quid $failed {puts stderr $quid}
+    }
     exit $status
   }
 
