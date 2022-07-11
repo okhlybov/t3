@@ -5,7 +5,7 @@
 
 package provide T3 0.1.0
 
-if {$tcl_interactive} {error {T3 package can not be used from within interactive session}}
+if {$tcl_interactive} {error "T3 package can not be used from within the interactive session"}
 
 package require Tcl 8.6
 package require Thread
@@ -14,6 +14,22 @@ package require Itcl
 if {[catch {set @boxed}]} {
 
   # The code below is executed by the master interpreter
+
+  # https://stackoverflow.com/questions/57348896/crc16-calculation-in-tcl
+  proc crc16ish {str} { 
+    set Polynom 0x1021
+    set Highbit 0x8000
+    set MASK 0xFFFF
+    set rem 0xFFFF
+    binary scan $str c* bytes
+    foreach byte $bytes {
+      set rem [expr {$rem ^ ($byte << 8)}]
+      foreach _ {7 6 5 4 3 2 1 0} {
+        set rem [expr {(($rem << 1) ^ ($rem & $Highbit ? $Polynom : 0)) & $MASK}]
+      }
+    }
+    return $rem
+  }
 
   # https://wiki.tcl-lang.org/page/lshift
   proc lshift {args} {
@@ -63,6 +79,11 @@ if {[catch {set @boxed}]} {
       configure -code $code
     }
 
+    # Construct a (quasi) unique #tag for unit
+    private method quid {} {
+      return #[format %04x [crc16ish "$name[pwd]$::argv0"]]
+    }
+
     # Submit unit's job
     method submit {} {
       lappend pending [tpool::post $pool [script]]
@@ -88,43 +109,85 @@ if {[catch {set @boxed}]} {
       }
     }
 
-    proc puts-yaml-multiline {pad tag output} {
-      set lines [split $output "\n"]
+    # Chop triling empty lines from the list
+    private proc chop-trail {list} {
+      set x [llength $list]; incr x -1
+      for {set i [expr {[llength $list]-1}]} {$i >= 0} {incr i -1} {
+        if {[string trim [lindex $list $i]] ne ""} {break}
+      }
+      if {$i} {return [lrange $list 0 $i]} else {return [list]}
+    }
+
+    private proc puts-yaml-block {pad tag report} {
+      set lines [chop-trail [split $report "\n"]]
       if {[lindex $lines end] eq ""} {set lines [lrange $lines 0 end-1]}
       switch [llength $lines] {
         0 {}
-        1 {puts "${pad}${tag}: [lindex $lines 0]"}
+        1 {puts "$pad$tag: [lindex $lines 0]"}
         default {
-          puts "${pad}${tag}: |"
+          puts "$pad$tag: |"
           foreach line $lines {puts "${pad}  $line"}
+        }
+      }
+    }
+
+    private proc puts-markdown-block {tag report} {
+      set lines [chop-trail [split $report "\n"]]
+      switch [llength $lines] {
+        0 {}
+        1 {puts "- $tag: $lines"}
+        default {
+          puts "- $tag:"
+          puts "    ~~~~"
+          foreach line $lines {puts "    $line"}
+          puts "    ~~~~"
         }
       }
     }
 
     # Analyze the completed job's outcome
     method analyze {outcome} {
+      # Passed units' details are output in verbose mode only
       dict with outcome {
-        switch $::output {
+        if {$::progress && !$::quiet} {
+            switch ${-code} {
+              0 {puts -nonewline stderr .}
+              default {puts -nonewline stderr F}
+            }
+        }
+        switch $::report {
           tap {
             if {${-code}} {
-              puts "\n${::pad}not ok $index - $name # ${-result}"
+              puts "\n${::pad}not ok $index - $name # ${-result} [quid]"
+            } else {
+              puts "\n${::pad}ok $index - $name [quid]"
+            }
+            if {${-code} || $::verbose} {
               set pad "${::pad}  "
               puts "${pad}---"
               puts "${pad}root: [pwd]"
               puts "${pad}source: [file tail $::argv0]"
               puts "${pad}exit: ${-code}"
-              puts "${pad}return: ${-result}"
-              puts-yaml-multiline $pad stdout ${-stdout}
-              puts-yaml-multiline $pad stderr ${-stderr}
+              if {${-result} ne ""} {puts "${pad}return: ${-result}"}
+              puts-yaml-block $pad stdout ${-stdout}
+              puts-yaml-block $pad stderr ${-stderr}
               puts "${pad}..."
-            } else {
-              puts "\n${::pad}ok $index - $name"
             }
           }
-          default {
-            switch ${-code} {
-              0 {puts -nonewline .}
-              default {puts -nonewline F}
+          markdown {
+            if {${-code} || $::verbose} {
+              puts {}
+              puts "---"
+              puts "## $name [quid]"
+            }
+            if {${-code}} {puts "***FAILURE***"}
+            if {${-code} || $::verbose} {
+              if {${-result} ne ""} {puts ${-result}}
+              puts "- root: [pwd]"
+              puts "- source: [file tail $::argv0]"
+              puts "- exit: ${-code}"
+              puts-markdown-block stdout ${-stdout}
+              puts-markdown-block stderr ${-stderr}
             }
           }
         }
@@ -201,21 +264,64 @@ if {[catch {set @boxed}]} {
   # Exit status to be returned to OS
   set status 0
 
-  # Results output mode: {default tap}
-  set output default
+  # Output progress to stderr
+  set progress 1
 
-  # Tth interpreter sandbox which executes the user-supplied code
+  # Suppress all non-report output
+  set quiet 0
+
+  # Increaed verbosity
+  set verbose 0
+
+  # Report output mode {tap markdown}
+  set report {}
+
+  set args $argv
+
+  # report usage to stdout and exit
+  set usage 0
+
+  # Parse supplied command line arguments
+  # Unknown arguments are silently ignored
+  while {[llength $args]} {
+    switch -regexp -- [lindex $args 0] {
+      --help {set usage 1; break}
+      --verbose {set verbose 1; lshift args}
+      --tap {set report tap; lshift args}
+      --markdown {set report markdown; lshift args}
+      --progress {set progress 1; lshift args}
+      --quiet {set quiet 1; lshift args}
+      -- {break}
+      {-[^-].*} {
+        foreach x [split [lshift args] {}] {
+          switch $x {
+            h {set usage 1; break}
+            q {set quiet 1}
+            v {set verbose 1}
+          }
+        }
+      }
+      default {lshift args}
+    }
+  }
+
+  if {$usage} {
+    puts "T3 unit testing framework command line options"
+    exit
+  }
+
+  # The interpreter sandbox which executes the user-supplied code
   interp create playground
 
   if {[catch {set @nesting}]} {
     # Executed by master toplevel interpreter only which has no @nesting variable set
-    switch $output {
-      tap {puts {TAP version 14}}
+    switch $report {
+      tap {puts "TAP version 14"}
     }
     set @nesting 0
   }
 
-  switch $output {
+  switch $report {
     tap {if {!${@nesting}} {puts "\n# $argv0"}}
   }
   
@@ -233,14 +339,14 @@ if {[catch {set @boxed}]} {
     try {
       # Re-evaluate current source on the playground
       if {[catch {interp eval playground [subst -nocommands {source [set argv0 {$argv0}]}]} result options]} {
-        switch $output {
+        switch $report {
           tap {puts "\n${pad}1..0 # $result"}
         }
         # Failure during interpreting user-supplied code
         set status 1
       } else {
         unit::process
-        switch $output {
+        switch $report {
           tap {puts "\n${pad}1..[llength $unit::submitted]"}
         }
       }
@@ -257,12 +363,13 @@ if {[catch {set @boxed}]} {
     # Recursive handling the subprojects sharing this source' name
     foreach source [glob -nocomplain -type f -tails -directory [pwd] [file join * [file tail $argv0]]] {
       set wd [pwd]
-      switch $output {
+      switch $report {
         tap {puts "\n${pad}# Subtest: [file join [file dirname $argv0] $source]"}
       }
       interp create descent
       set code [subst -nocommands {
         set @nesting $nesting
+        set argv $argv
         source [set argv0 {$source}]
       }]
       # FIXME proper exception handling
@@ -283,9 +390,7 @@ if {[catch {set @boxed}]} {
     error
   } else {
     # Termination part of toplevel project
-    switch $output {
-      default {puts "\n[expr {$submitted - $failed}]/$submitted"}
-    }
+    if {$progress && !$quiet} {puts stderr "\n[expr {$submitted - $failed}]/$submitted"}
     exit $status
   }
 
