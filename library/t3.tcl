@@ -8,8 +8,8 @@ package provide T3 0.1.0
 if {$tcl_interactive} {error "T3 package can not be used from within the interactive session"}
 
 package require Tcl 8.6
-package require Thread
 package require Itcl
+package require Thread
 
 if {[catch {set @boxed}]} {
 
@@ -35,11 +35,13 @@ if {[catch {set @boxed}]} {
   proc lshift {args} {
     lassign $args listVar count
     upvar 1 $listVar var
-    if { ! [info exists var] } {
-        return -level 1 -code error [subst {can't read "$listVar": no such variable}]
+    if {![info exists var]} {
+      return -level 1 -code error [subst {can't read "$listVar": no such variable}]
     }
     switch -exact -- [llength $args] {
-      1 { set var [lassign $var value] }
+      1 {
+          set var [lassign $var value]
+      }
       2 {
           set value [lrange $var 0 $count-1]
           set var [lrange $var $count end]
@@ -55,10 +57,10 @@ if {[catch {set @boxed}]} {
   itcl::class unit {
 
     # Unit unique index
-    public variable index
+    private variable index
 
     # Unit name
-    public variable name
+    public variable name {}
 
     # Set of assigned tags
     public variable tags [list]
@@ -75,17 +77,17 @@ if {[catch {set @boxed}]} {
     constructor {code} {
       incr count
       set index $count
-      set name @$count
       configure -code $code
     }
 
     # Construct a (quasi) unique #tag for unit
     method quid {} {
-      return #[format %04x [crc16ish "$name[pwd]$::argv0"]]
+      return @[format %04x [crc16ish "$name[pwd]$::argv0"]]
     }
 
     # Submit unit's job
     method submit {} {
+      if {[llength $::quids] && [lsearch $::quids [quid]] < 0} {return}
       lappend pending [tpool::post $pool [script]]
       lappend submitted [self]
     }
@@ -111,11 +113,23 @@ if {[catch {set @boxed}]} {
 
     # Chop triling empty lines from the list
     private proc chop-trail {list} {
+      set empty 1
       set x [llength $list]; incr x -1
       for {set i [expr {[llength $list]-1}]} {$i >= 0} {incr i -1} {
-        if {[string trim [lindex $list $i]] ne ""} {break}
+        if {[string trim [lindex $list $i]] ne ""} {
+          set empty 0
+          break
+        }
       }
-      if {$i} {return [lrange $list 0 $i]} else {return [list]}
+      if {!$empty} {return [lrange $list 0 $i]} else {return [list]}
+    }
+
+    private method full-name {} {
+      if {$name eq ""} {
+        return [quid]
+      } else {
+        return "$name [quid]"
+      }
     }
 
     private proc puts-yaml-block {pad tag report} {
@@ -135,7 +149,7 @@ if {[catch {set @boxed}]} {
       set lines [chop-trail [split $report "\n"]]
       switch [llength $lines] {
         0 {}
-        1 {puts "- $tag: $lines"}
+        1 {puts "- $tag: [lindex $lines 0]"}
         default {
           puts "- $tag:"
           puts "    ~~~~"
@@ -158,15 +172,16 @@ if {[catch {set @boxed}]} {
         switch $::report {
           tap {
             if {${-code}} {
-              puts "\n${::pad}not ok $index - $name # ${-result} [quid]"
+              puts "\n${::pad}not ok $index - [full-name] # ${-result}"
             } else {
-              puts "\n${::pad}ok $index - $name [quid]"
+              puts "\n${::pad}ok $index - [full-name]"
             }
             if {${-code} || $::verbose} {
               set pad "${::pad}  "
               puts "${pad}---"
               puts "${pad}root: [pwd]"
               puts "${pad}source: [file tail $::argv0]"
+              if {[llength $tags]} {puts "${pad}tags: $tags"}
               puts "${pad}exit: ${-code}"
               if {${-result} ne ""} {puts "${pad}return: ${-result}"}
               puts-yaml-block $pad stdout ${-stdout}
@@ -178,13 +193,14 @@ if {[catch {set @boxed}]} {
             if {${-code} || $::verbose} {
               puts {}
               puts "---"
-              puts "## $name [quid]"
+              puts "## [full-name]"
             }
             if {${-code}} {puts "***FAILURE***"}
             if {${-code} || $::verbose} {
               if {${-result} ne ""} {puts ${-result}}
               puts "- root: [pwd]"
               puts "- source: [file tail $::argv0]"
+              if {[llength $tags]} {puts "- tags: $tags"}
               puts "- exit: ${-code}"
               puts-markdown-block stdout ${-stdout}
               puts-markdown-block stderr ${-stderr}
@@ -281,18 +297,33 @@ if {[catch {set @boxed}]} {
   # report usage to stdout and exit
   set usage 0
 
+  namespace eval tags {
+    set include [list]
+    set exclude [list]
+    set select [list]
+    set separators {,;: }
+  }
+
+  # List of the unit's quids to be run
+  set quids [list]
+
   # Parse supplied command line arguments
   # Unknown arguments are silently ignored
   while {[llength $args]} {
     switch -regexp -- [lindex $args 0] {
-      --help {set usage 1; break}
-      --verbose {set verbose 1; lshift args}
-      --tap {set report tap; lshift args}
-      --markdown {set report markdown; lshift args}
-      --progress {set progress 1; lshift args}
-      --quiet {set quiet 1; lshift args}
-      -- {break}
-      {-[^-].*} {
+      {^@[0-9a-f]{4}$} {lappend quids [lshift args]}
+      {^--$} {break}
+      {^--help$} {set usage 1; break}
+      {^--verbose$} {set verbose 1; lshift args}
+      {^--tap$} {set report tap; lshift args}
+      {^--markdown$} {set report markdown; lshift args}
+      {^--progress$} {set progress 1; lshift args}
+      {^--quiet$} {set quiet 1; lshift args}
+      {^--tags-separators$} {lassign [lshift args 2] _ tags::separators}
+      {^(-i|--tags-include)$} {lappend tags::include {*}[split [lindex $args 1] $tags::separators]; lshift args 2}
+      {^(-x|--tags-exclude)$} {lappend tags::exclude {*}[split [lindex $args 1] $tags::separators]; lshift args 2}
+      {^(-s|--tags-select)$} {lappend tags::select {*}[split [lindex $args 1] $tags::separators]; lshift args 2}
+      {^-[^-].*$} {
         foreach x [split [lshift args] {}] {
           switch $x {
             h {set usage 1; break}
