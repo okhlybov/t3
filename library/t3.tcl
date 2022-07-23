@@ -80,8 +80,18 @@ if {[catch {set @boxed}]} {
     proc disjoin {set1 set2} {
       return [subtract [join $set1 $set2] [intersect $set1 $set2]]
     }
+    # True if set1 and set2 have common elements
+    proc disjoint? {set1 set2} {
+      return [expr {[llength [intersect $set1 $set2]] == 0}]
+    }
+    # True if set2 is a proper subset of set1
+    proc subset? {set subset} {
+      return [expr {[llength [intersect $set $subset]] == [llength $subset]}]
+    }
   }
 
+puts [set::subset? {1 z 2 3} {z 1}]
+exit
   # Async unit
   itcl::class unit {
 
