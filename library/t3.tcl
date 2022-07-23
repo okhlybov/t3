@@ -90,8 +90,6 @@ if {[catch {set @boxed}]} {
     }
   }
 
-puts [set::subset? {1 z 2 3} {z 1}]
-exit
   # Async unit
   itcl::class unit {
 
