@@ -84,7 +84,7 @@ if {[catch {set @boxed}]} {
     proc disjoint? {set1 set2} {
       return [expr {[llength [intersect $set1 $set2]] == 0}]
     }
-    # True if set2 is a proper subset of set1
+    # True if subset is a proper subset of set
     proc subset? {set subset} {
       return [expr {[llength [intersect $set $subset]] == [llength $subset]}]
     }
