@@ -53,6 +53,35 @@ if {[catch {set @boxed}]} {
     return $value
   }
 
+  # Ordered set operations on sorted lists of unique elements
+  namespace eval set {
+    # {*}
+    proc create {args} {
+      return [lsort -unique $args]
+    }
+    # set1 | set2
+    proc join {set1 set2} {
+      return [create {*}$set1 {*}$set2]
+    }
+    # set1 - set2
+    proc subtract {set1 set2} {
+      foreach e $set2 {set set1 [lsearch -sorted -inline -exact -all -not $set1 $e]}
+      return $set1
+    }
+    # set1 & set2
+    proc intersect {set1 set2} {
+      set s [list]
+      foreach e [join $set1 $set2] {
+        if {[lsearch -sorted -all $set1 $e] >= 0 && [lsearch -sorted -all $set2 $e] >= 0} {lappend s $e}
+      }
+      return [create {*}$s]
+    }
+    # set1 ^ set2
+    proc disjoin {set1 set2} {
+      return [subtract [join $set1 $set2] [intersect $set1 $set2]]
+    }
+  }
+
   # Async unit
   itcl::class unit {
 
@@ -80,9 +109,9 @@ if {[catch {set @boxed}]} {
       configure -code $code
     }
 
-    # Construct a (quasi) unique #tag for unit
+    # Construct a quasi-unique @tag for unit
     method quid {} {
-      return @[format %04x [crc16ish "$name[pwd]$::argv0"]]
+      return @[format %04x [crc16ish "$name$index[pwd]$::argv0"]]
     }
 
     # Submit unit's job
