@@ -5,7 +5,7 @@
 
 package provide T3 0.1.0
 
-if {$tcl_interactive} {error "T3 package can not be used from within the interactive session"}
+if {$tcl_interactive} {error "T3 package can't be used from within the interactive session"}
 
 package require Tcl 8.6
 package require Itcl
@@ -80,13 +80,13 @@ if {[catch {set @boxed}]} {
     proc disjoin {set1 set2} {
       return [subtract [join $set1 $set2] [intersect $set1 $set2]]
     }
-    # True if set1 and set2 have common elements
+    # True if set1 and set2 are disjoint i.e. share no common elements
     proc disjoint? {set1 set2} {
       return [expr {[llength [intersect $set1 $set2]] == 0}]
     }
     # True if subset is a proper subset of set
     proc subset? {set subset} {
-      return [expr {[llength [intersect $set $subset]] == [llength $subset]}]
+      return [expr {[intersect $set $subset] eq $subset}]
     }
   }
 
@@ -111,6 +111,9 @@ if {[catch {set @boxed}]} {
     # Main code block
     public variable code
 
+    # List of skip reasons
+    private variable skips [list]
+
     constructor {code} {
       incr count
       set index $count
@@ -124,7 +127,22 @@ if {[catch {set @boxed}]} {
 
     # Submit unit's job
     method submit {} {
-      if {[llength $::quids] && [lsearch $::quids [quid]] < 0} {return}
+      if {[llength $::quids]} {
+        # Force run specific units, disable tags filtering
+        if {[lsearch $::quids [quid]] < 0} {return}
+      } else {
+        # Default unit filtering rules apply
+        if {[llength $tags]} {
+          # List of skip reasons
+          if {[llength $::tags::none] && ![set::disjoint? $tags $::tags::none]} {lappend skips none}
+          if {[llength $::tags::any] && [set::disjoint? $tags $::tags::any]} {lappend skips any}
+          if {[llength $::tags::all] && ![set::subset? $tags $::tags::all]} {lappend skips all}
+          if {[llength $skips]} {
+            lappend skipped [self]
+            return
+          }
+        }
+      }
       lappend pending [tpool::post $pool [script]]
       lappend submitted [self]
     }
@@ -148,7 +166,7 @@ if {[catch {set @boxed}]} {
       }
     }
 
-    # Chop triling empty lines from the list
+    # Chop trailing empty lines from the list
     private proc chop-trail {list} {
       set empty 1
       set x [llength $list]; incr x -1
@@ -196,15 +214,16 @@ if {[catch {set @boxed}]} {
       }
     }
 
-    # Analyze the completed job's outcome
-    method analyze {outcome} {
+    # Process the completed job's outcome
+    method process-completed {outcome} {
       # Passed units' details are output in verbose mode only
       dict with outcome {
         if {$::progress && !$::quiet} {
-            switch ${-code} {
-              0 {puts -nonewline stderr .}
-              default {puts -nonewline stderr F}
-            }
+          switch ${-code} {
+            0 {puts -nonewline stderr .}
+            default {puts -nonewline stderr F}
+          }
+          flush stderr
         }
         switch $::report {
           tap {
@@ -232,7 +251,7 @@ if {[catch {set @boxed}]} {
               puts "---"
               puts "## [full-name]"
             }
-            if {${-code}} {puts "***FAILURE***"}
+            if {${-code}} {puts "***FAILURE*** -- ${-result}"}
             if {${-code} || $::verbose} {
               if {${-result} ne ""} {puts ${-result}}
               puts "- root: [pwd]"
@@ -248,6 +267,48 @@ if {[catch {set @boxed}]} {
         if {${-code}} {
           set ::status 1
           lappend failed [self]
+        }
+      }
+      flush stdout
+    }
+
+    # Process skipped unit
+    method process-skipped {} {
+      if {$::progress && !$::quiet} {
+        puts -nonewline stderr s
+        flush stderr
+      }
+      set s [list]
+      foreach skip $skips {
+        switch $skip {
+          none {lappend s "none {$::tags::none}"}
+          any {lappend s "!any {$::tags::any}"}
+          all {lappend s "!all {$::tags::all}"}
+        }
+      }
+      set s [join $s {, }]
+      switch $::report {
+        tap {
+          puts "\n${::pad}ok $index - [full-name] # SKIP filtered out by tag rules -- $s"
+          if {$::verbose} {
+            set pad "${::pad}  "
+            puts "${pad}---"
+            puts "${pad}root: [pwd]"
+            puts "${pad}source: [file tail $::argv0]"
+            if {[llength $tags]} {puts "${pad}tags: $tags"}
+            puts "${pad}..."
+          }
+        }
+        markdown {
+          if {$::verbose} {
+            puts {}
+            puts "---"
+            puts "## [full-name]"
+            puts "***SKIP*** -- $s"
+            puts "- root: [pwd]"
+            puts "- source: [file tail $::argv0]"
+            if {[llength $tags]} {puts "- tags: $tags"}
+          }
         }
       }
       flush stdout
@@ -275,15 +336,21 @@ if {[catch {set @boxed}]} {
     # List of submitted units
     public common submitted [list]
 
+    # List of skipped units due to filering rules
+    public common skipped [list]
+
     # List of failed tests
     public common failed [list]
 
-    # Wait for and process the results of all pending units' jobs
+    # Wait for and process the results of all units' jobs
     proc process {} {
+      # Process skipped units
+      foreach unit $skipped {$unit process-skipped}
+      # Process competed units
       while {[llength $pending] > 0} {
         foreach job [tpool::wait $pool $pending pending] {
           set outcome [tpool::get $pool $job]
-          [dict get $outcome -this] analyze $outcome
+          [dict get $outcome -this] process-completed $outcome
         }
       }
     }
@@ -314,6 +381,9 @@ if {[catch {set @boxed}]} {
     }
   }
 
+  # Convert raw tag list to a sorted set
+  itcl::configbody unit::tags {set tags [set::create {*}$tags]}
+
   # Exit status to be returned to OS
   set status 0
 
@@ -335,14 +405,20 @@ if {[catch {set @boxed}]} {
   set usage 0
 
   namespace eval tags {
-    set include [list]
-    set exclude [list]
-    set select [list]
-    set separators {,;: }
+    set any [list]
+    set all [list]
+    set none [list]
+    set separators {:;, }
   }
 
   # List of the unit's quids to be run
   set quids [list]
+
+  namespace eval quids {
+    set submitted [list]
+    set skipped [list]
+    set failed [list]
+  }
 
   # Parse supplied command line arguments
   # Unknown arguments are silently ignored
@@ -357,9 +433,9 @@ if {[catch {set @boxed}]} {
       {^--progress$} {set progress 1; lshift args}
       {^--quiet$} {set quiet 1; lshift args}
       {^--tags-separators$} {lassign [lshift args 2] _ tags::separators}
-      {^(-i|--tags-include)$} {lappend tags::include {*}[split [lindex $args 1] $tags::separators]; lshift args 2}
-      {^(-x|--tags-exclude)$} {lappend tags::exclude {*}[split [lindex $args 1] $tags::separators]; lshift args 2}
-      {^(-s|--tags-select)$} {lappend tags::select {*}[split [lindex $args 1] $tags::separators]; lshift args 2}
+      {^(-i|--tags-any)$} {lappend tags::any {*}[split [lindex $args 1] $tags::separators]; lshift args 2}
+      {^(-s|--tags-all)$} {lappend tags::all {*}[split [lindex $args 1] $tags::separators]; lshift args 2}
+      {^(-x|--tags-none)$} {lappend tags::none {*}[split [lindex $args 1] $tags::separators]; lshift args 2}
       {^-[^-].*$} {
         foreach x [split [lshift args] {}] {
           switch $x {
@@ -371,6 +447,13 @@ if {[catch {set @boxed}]} {
       }
       default {lshift args}
     }
+  }
+
+  # Convert all tag lists to sets
+  namespace eval tags {
+    set any [set::create {*}$any]
+    set all [set::create {*}$all]
+    set none [set::create {*}$none]
   }
 
   if {$usage} {
@@ -404,10 +487,6 @@ if {[catch {set @boxed}]} {
 
     playground alias unit unit::define
 
-    # Lists of quids
-    set submitted [list]
-    set failed [list]
-
     try {
       # Re-evaluate current source on the playground
       if {[catch {interp eval playground [subst -nocommands {source [set argv0 {$argv0}]}]} result options]} {
@@ -419,13 +498,17 @@ if {[catch {set @boxed}]} {
       } else {
         unit::process
         switch $report {
-          tap {puts "\n${pad}1..[llength $unit::submitted]"}
+          tap {
+            set tc [expr {[llength $unit::submitted] + [llength $unit::skipped]}]
+            puts "\n${pad}1..$tc"
+          }
         }
       }
     } finally {
       # Collect statistics
-      foreach unit $unit::submitted {lappend submitted [$unit quid]}
-      foreach unit $unit::failed {lappend failed [$unit quid]}
+      foreach unit $unit::submitted {lappend quids::submitted [$unit quid]}
+      foreach unit $unit::skipped {lappend quids::skipped [$unit quid]}
+      foreach unit $unit::failed {lappend quids::failed [$unit quid]}
       unit::shutdown
     }
 
@@ -447,8 +530,9 @@ if {[catch {set @boxed}]} {
       # FIXME proper exception handling
       catch {interp eval descent $code}
       if {[interp eval descent {set status}]} {set status 1}
-      lappend submitted {*}[interp eval descent {set submitted}]
-      lappend failed {*}[interp eval descent {set failed}]
+      lappend quids::submitted {*}[interp eval descent {set quids::submitted}]
+      lappend quids::skipped {*}[interp eval descent {set quids::skipped}]
+      lappend quids::failed {*}[interp eval descent {set quids::failed}]
       interp delete descent
       cd $wd
     }
@@ -463,11 +547,11 @@ if {[catch {set @boxed}]} {
     error "exiting from the subproject"
   } else {
     # Termination part of toplevel project
-    set sc [llength $submitted]
-    set fc [llength $failed]
-    if {$progress && !$quiet} {puts stderr "\n[expr {$sc - $fc}]/$sc"}
+    set tc [expr {[llength $quids::submitted] + [llength $quids::skipped]}]
+    set fc [llength $quids::failed]
+    if {$progress && !$quiet} {puts stderr "\n[expr {$tc - $fc}]/$tc"}
     if {$verbose && !$quiet} {
-      foreach quid $failed {puts stderr $quid}
+      foreach quid $quids::failed {puts stderr $quid}
     }
     exit $status
   }
