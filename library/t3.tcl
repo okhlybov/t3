@@ -253,7 +253,6 @@ if {[catch {set @boxed}]} {
             }
             if {${-code}} {puts "***FAILURE*** -- ${-result}"}
             if {${-code} || $::verbose} {
-              if {${-result} ne ""} {puts ${-result}}
               puts "- root: [pwd]"
               puts "- source: [file tail $::argv0]"
               if {[llength $tags]} {puts "- tags: $tags"}
@@ -490,9 +489,11 @@ if {[catch {set @boxed}]} {
     try {
       # Re-evaluate current source on the playground
       if {[catch {interp eval playground [subst -nocommands {source [set argv0 {$argv0}]}]} result options]} {
+        puts stderr [dict get $options -errorinfo]
         switch $report {
-          tap {puts "\n${pad}1..0 # $result"}
+          tap {puts "Bail out! Tcl code error"}
         }
+        exit 2
         # Failure during interpreting user-supplied code
         set status 1
       } else {
@@ -528,11 +529,22 @@ if {[catch {set @boxed}]} {
         source [set argv0 {$source}]
       }]
       # FIXME proper exception handling
-      catch {interp eval descent $code}
-      if {[interp eval descent {set status}]} {set status 1}
-      lappend quids::submitted {*}[interp eval descent {set quids::submitted}]
-      lappend quids::skipped {*}[interp eval descent {set quids::skipped}]
-      lappend quids::failed {*}[interp eval descent {set quids::failed}]
+      if {[catch {interp eval descent $code} result options]} {
+        if {[dict get $options -errorcode] == -1} {
+          # Normal termination on the subproject interpreter
+          if {[interp eval descent {set status}]} {set status 1}
+          lappend quids::submitted {*}[interp eval descent {set quids::submitted}]
+          lappend quids::skipped {*}[interp eval descent {set quids::skipped}]
+          lappend quids::failed {*}[interp eval descent {set quids::failed}]
+        } else {
+          # Unrecoverable execution error in the subproject, have to bail out
+          puts stderr [dict get $options -errorinfo]
+          switch $report {
+            tap {puts "Bail out! Tcl code error"}
+          }
+          exit 2
+        }
+      }
       interp delete descent
       cd $wd
     }
@@ -542,11 +554,12 @@ if {[catch {set @boxed}]} {
   }
 
   if {${@nesting}} {
-    # FIXME
     # Termination part of the subproject
-    error "exiting from the subproject"
+    # Using special error code to indicate normal exit from the subproject
+    error {} {} -1
   } else {
     # Termination part of toplevel project
+    # Output consolidated statistics
     set tc [expr {[llength $quids::submitted] + [llength $quids::skipped]}]
     set fc [llength $quids::failed]
     if {$progress && !$quiet} {puts stderr "\n[expr {$tc - $fc}]/$tc"}
