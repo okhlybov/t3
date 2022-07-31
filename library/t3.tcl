@@ -264,7 +264,7 @@ if {[catch {set @boxed}]} {
         }
         # Flag the entire harness failure if any of units fail
         if {${-code}} {
-          set ::status 1
+          set ::status 2
           lappend failed [self]
         }
       }
@@ -384,6 +384,9 @@ if {[catch {set @boxed}]} {
   itcl::configbody unit::tags {set tags [set::create {*}$tags]}
 
   # Exit status to be returned to OS
+  # 0 - success
+  # 1 - Tcl code error(s)
+  # 2 - unit test falure(s)
   set status 0
 
   # Output progress to stderr
@@ -493,9 +496,7 @@ if {[catch {set @boxed}]} {
         switch $report {
           tap {puts "Bail out! Tcl code error"}
         }
-        exit 2
-        # Failure during interpreting user-supplied code
-        set status 1
+        exit 1
       } else {
         unit::process
         switch $report {
@@ -532,7 +533,7 @@ if {[catch {set @boxed}]} {
       if {[catch {interp eval descent $code} result options]} {
         if {[dict get $options -errorcode] == -1} {
           # Normal termination on the subproject interpreter
-          if {[interp eval descent {set status}]} {set status 1}
+          if {[interp eval descent {set status}]} {set status 2}
           lappend quids::submitted {*}[interp eval descent {set quids::submitted}]
           lappend quids::skipped {*}[interp eval descent {set quids::skipped}]
           lappend quids::failed {*}[interp eval descent {set quids::failed}]
@@ -542,7 +543,7 @@ if {[catch {set @boxed}]} {
           switch $report {
             tap {puts "Bail out! Tcl code error"}
           }
-          exit 2
+          exit 1
         }
       }
       interp delete descent
